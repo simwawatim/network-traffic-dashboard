@@ -30,6 +30,8 @@ from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
+
 from pydantic import BaseModel
 
 class LoginInput(BaseModel):
