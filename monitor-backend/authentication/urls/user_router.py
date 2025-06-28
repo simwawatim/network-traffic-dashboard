@@ -8,6 +8,13 @@ from fastapi import status
 from authentication.utils.jwt_handler import create_access_token, get_current_user
 from authentication.models.model import Token, User
 from passlib.context import CryptContext
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import status
+from authentication.utils.jwt_handler import create_access_token
+from authentication.models.model import User
+from passlib.context import CryptContext
+from pydantic import BaseModel
+from typing import List
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -22,17 +29,11 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     return new_user
 
 
-from fastapi.security import OAuth2PasswordRequestForm
-from fastapi import status
-from authentication.utils.jwt_handler import create_access_token
-from authentication.models.model import User
-from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 
-from pydantic import BaseModel
 
 class LoginInput(BaseModel):
     username: str
@@ -52,4 +53,7 @@ def protected_route(current_user: str = Depends(get_current_user)):
     return {"message": f"Hello, {current_user}"}
 
 
-
+@router.get("/users", response_model=List[UserOut])
+def get_all_users(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return users
