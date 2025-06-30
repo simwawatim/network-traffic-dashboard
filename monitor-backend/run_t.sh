@@ -1,3 +1,3 @@
 #!/bin/bash
 source env/bin/activate
-python3 traffic.py
+python3 test.py

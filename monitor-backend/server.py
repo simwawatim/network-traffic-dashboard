@@ -31,7 +31,7 @@ device_monitor = NetworkDeviceMonitor()
 threading.Thread(target=device_monitor.start, daemon=True).start()
 
 # Start traffic monitor
-traffic_monitor = NetworkMonitor()
+traffic_monitor = NetworkMonitor(interface="wlp3s0")
 traffic_monitor.start()
 
 # Include user routes (where /register is defined)
